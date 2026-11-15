@@ -1,0 +1,713 @@
+-- EVERGREEN main menu: builds the ScreenGui, runs the entrance animation, the
+-- Characters / Settings / Credits / Update Log panels, responsive layout, and the
+-- Play transition (INITIALIZING -> MENU_ACTIVE -> TRANSITIONING -> GAMEPLAY).
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local GuiService = game:GetService("GuiService")
+local StarterGui = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local MenuConfig = require(Shared:WaitForChild("MenuConfig"))
+local MenuState = require(Shared:WaitForChild("MenuState"))
+local MenuAudio = require(Shared:WaitForChild("MenuAudio"))
+local MenuCamera = require(Shared:WaitForChild("MenuCamera"))
+local UIKit = require(script:WaitForChild("UIKit"))
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local StartGameplay: RemoteFunction = Remotes:WaitForChild("StartGameplay")
+local LoadSettings: RemoteFunction = Remotes:WaitForChild("LoadSettings")
+local SaveSettings: RemoteEvent = Remotes:WaitForChild("SaveSettings")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+local S = MenuState.States
+local T = UIKit.Theme
+local new = UIKit.new
+
+if player.Character then
+	warn("[MainMenu] character already loaded; CharacterAutoLoads should be false for the menu flow")
+end
+
+-- Core UI chrome hidden while the menu is up
+-- Chat is hidden too: its window overlaps the menu column and would swallow clicks there.
+local HIDDEN_CORE = { Enum.CoreGuiType.PlayerList, Enum.CoreGuiType.Backpack, Enum.CoreGuiType.Health, Enum.CoreGuiType.EmotesMenu, Enum.CoreGuiType.Chat }
+local function setCoreUi(enabled: boolean)
+	for _, t in ipairs(HIDDEN_CORE) do
+		pcall(StarterGui.SetCoreGuiEnabled, StarterGui, t, enabled)
+	end
+end
+setCoreUi(false)
+
+-- Build
+local gui = new("ScreenGui", {
+	Name = "MainMenuGui",
+	IgnoreGuiInset = true,
+	ResetOnSpawn = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 10,
+})
+
+local rootFrame = new("Frame", { Name = "Root", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = gui })
+local uiScale = new("UIScale", { Parent = rootFrame })
+
+-- readability shade (no opaque panels over the scene)
+local shade = new("Frame", {
+	Name = "Shade",
+	Size = UDim2.fromScale(0.62, 1),
+	BackgroundColor3 = Color3.fromRGB(4, 14, 18),
+	BackgroundTransparency = 0,
+	Parent = gui,
+})
+local shadeGradient = new("UIGradient", {
+	Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.38),
+		NumberSequenceKeypoint.new(0.55, 0.78),
+		NumberSequenceKeypoint.new(1, 1),
+	}),
+	Parent = shade,
+})
+
+-- Main column: title + navigation
+local main = new("Frame", { Name = "Main", BackgroundTransparency = 1, Size = UDim2.fromOffset(480, 640), Parent = rootFrame })
+
+local titleBlock = new("Frame", { Name = "TitleBlock", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 236), Parent = main })
+
+-- emblem: nested diamonds with a teal heart
+local emblem = new("Frame", { Name = "Emblem", BackgroundTransparency = 1, Size = UDim2.fromOffset(60, 60), Position = UDim2.fromOffset(6, 0), Parent = titleBlock })
+UIKit.diamond(40, { Name = "Outer", Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1, Parent = emblem }, nil)
+UIKit.stroke(T.Gold, 2, 0).Parent = emblem.Outer
+UIKit.diamond(26, { Name = "Inner", Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = T.Teal, BackgroundTransparency = 0.15, Parent = emblem })
+UIKit.stroke(T.GoldBright, 1.2, 0.2).Parent = emblem.Inner
+UIKit.diamond(8, { Name = "Heart", Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = T.GoldBright, Parent = emblem })
+for _, side in ipairs({ -1, 1 }) do
+	local ray = new("Frame", {
+		AnchorPoint = Vector2.new(side < 0 and 1 or 0, 0.5),
+		Position = UDim2.new(0.5, side * 34, 0.5, 0),
+		Size = UDim2.fromOffset(side < 0 and 0 or 120, 1),
+		BackgroundColor3 = T.Gold,
+		BackgroundTransparency = side < 0 and 1 or 0.2,
+		Parent = emblem,
+	})
+	new("UIGradient", { Transparency = NumberSequence.new(0, 1), Parent = ray })
+end
+
+local titleText = UIKit.spaced(MenuConfig.Title, "\u{2009}\u{200A}")
+local titleShadow = UIKit.label({
+	Name = "TitleShadow",
+	Text = titleText,
+	Position = UDim2.fromOffset(3, 70),
+	Size = UDim2.new(1, 0, 0, 92),
+	TextSize = 88,
+	FontFace = Font.new(T.TitleFont.Family, Enum.FontWeight.Bold),
+	TextColor3 = Color3.fromRGB(0, 0, 0),
+	TextTransparency = 0.45,
+	Parent = titleBlock,
+})
+local title = UIKit.label({
+	Name = "Title",
+	Text = titleText,
+	Position = UDim2.fromOffset(0, 66),
+	Size = UDim2.new(1, 0, 0, 92),
+	TextSize = 88,
+	FontFace = Font.new(T.TitleFont.Family, Enum.FontWeight.Bold),
+	TextColor3 = T.Ivory,
+	Parent = titleBlock,
+})
+UIKit.stroke(Color3.fromRGB(8, 26, 30), 2, 0.25).Parent = title
+title:FindFirstChildOfClass("UIStroke").ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+new("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.fromRGB(255, 252, 240), Color3.fromRGB(240, 222, 184)), Parent = title })
+if MenuConfig.LogoImage ~= "" then
+	title.Visible = false
+	titleShadow.Visible = false
+	new("ImageLabel", { Name = "Logo", Image = MenuConfig.LogoImage, BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit, Position = UDim2.fromOffset(0, 62), Size = UDim2.new(1, 0, 0, 100), Parent = titleBlock })
+end
+
+local divider = new("Frame", { Name = "Divider", Position = UDim2.fromOffset(4, 170), Size = UDim2.fromOffset(380, 1), BackgroundColor3 = T.Gold, BackgroundTransparency = 0.15, Parent = titleBlock })
+new("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.6, 0.2), NumberSequenceKeypoint.new(1, 1) }), Parent = divider })
+UIKit.diamond(7, { Name = "DividerGem", Position = UDim2.fromOffset(4, 170), Parent = titleBlock })
+local subtitle = UIKit.label({
+	Name = "Subtitle",
+	Text = UIKit.spaced(MenuConfig.Subtitle, "\u{2009}\u{2009}"),
+	Position = UDim2.fromOffset(2, 184),
+	Size = UDim2.new(1, 0, 0, 30),
+	TextSize = 24,
+	FontFace = Font.new(T.UIFont.Family, Enum.FontWeight.SemiBold),
+	TextColor3 = T.Gold,
+	Parent = titleBlock,
+})
+UIKit.stroke(Color3.fromRGB(8, 26, 30), 1.5, 0.35).Parent = subtitle
+subtitle:FindFirstChildOfClass("UIStroke").ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+
+local nav = new("Frame", { Name = "Nav", BackgroundTransparency = 1, Position = UDim2.fromOffset(0, 262), Size = UDim2.fromOffset(320, 280), Parent = main }, {
+	new("UIListLayout", { Padding = UDim.new(0, 12), SortOrder = Enum.SortOrder.LayoutOrder }),
+})
+
+local footer = new("Frame", { Name = "Footer", BackgroundTransparency = 1, Position = UDim2.fromOffset(0, 566), Size = UDim2.new(1, 0, 0, 60), Parent = main })
+local versionLabel = UIKit.label({ Name = "Version", Text = MenuConfig.Version, Position = UDim2.fromOffset(2, 32), Size = UDim2.new(1, 0, 0, 22), TextSize = 16, TextColor3 = T.Ivory, TextTransparency = 0.35, Parent = footer })
+
+-- panels sit where the navigation is, so the windmill stays clear
+local panelHost = new("Frame", { Name = "Panels", BackgroundTransparency = 1, Size = UDim2.fromOffset(560, 640), Parent = rootFrame })
+
+local toast = UIKit.label({
+	Name = "Toast",
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.new(0.5, 0, 1, -40),
+	Size = UDim2.fromOffset(520, 40),
+	TextXAlignment = Enum.TextXAlignment.Center,
+	TextSize = 20,
+	BackgroundColor3 = T.Panel,
+	BackgroundTransparency = 1,
+	TextTransparency = 1,
+	Parent = gui,
+}, nil)
+UIKit.corner(6).Parent = toast
+
+local overlay = new("Frame", {
+	Name = "Overlay",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.fromRGB(250, 246, 236),
+	BackgroundTransparency = 0,
+	ZIndex = 100,
+	Parent = gui,
+})
+
+-- State used by controls
+local interactive = false
+local busy = false
+local openPanel: { frame: Frame }? = nil
+local panels = {}
+local navButtons = {}
+
+local function showToast(text: string)
+	toast.Text = text
+	UIKit.tween(toast, TweenInfo.new(0.3), { TextTransparency = 0, BackgroundTransparency = 0.25 })
+	task.delay(3, function()
+		UIKit.tween(toast, TweenInfo.new(0.5), { TextTransparency = 1, BackgroundTransparency = 1 })
+	end)
+end
+
+local function setNavEnabled(on: boolean)
+	for _, b in ipairs(navButtons) do
+		b.setEnabled(on)
+	end
+end
+
+-- Panels
+local function closePanel()
+	if not openPanel or busy then
+		return
+	end
+	MenuAudio.click()
+	local p = openPanel
+	openPanel = nil
+	UIKit.fade(p.frame, false, 0.22)
+	UIKit.tween(p.frame, TweenInfo.new(0.25, Enum.EasingStyle.Quad), { Position = UDim2.new(0, -24, 0.5, 0) })
+	task.delay(0.25, function()
+		if openPanel ~= p then
+			p.frame.Visible = false
+		end
+	end)
+	main.Visible = true
+	UIKit.fade(nav, true, 0.3)
+	UIKit.fade(footer, true, 0.3)
+	UIKit.tween(nav, TweenInfo.new(0.3, Enum.EasingStyle.Quad), { Position = UDim2.fromOffset(0, 262) })
+	setNavEnabled(true)
+	UIKit.fade(titleBlock, true, 0.3)
+	if GuiService.SelectedObject then
+		GuiService.SelectedObject = navButtons[1].button
+	end
+end
+
+local function openPanelNamed(name: string)
+	if not interactive or busy or openPanel then
+		return
+	end
+	local p = panels[name]
+	if not p then
+		return
+	end
+	MenuAudio.click()
+	openPanel = p
+	setNavEnabled(false)
+	UIKit.fade(nav, false, 0.2)
+	UIKit.fade(footer, false, 0.2)
+	UIKit.fade(titleBlock, false, 0.2)
+	UIKit.tween(nav, TweenInfo.new(0.25, Enum.EasingStyle.Quad), { Position = UDim2.fromOffset(-24, 262) })
+	p.frame.Position = UDim2.new(0, 24, 0.5, 0)
+	UIKit.setHidden(p.frame)
+	p.frame.Visible = true
+	UIKit.fade(p.frame, true, 0.35)
+	UIKit.tween(p.frame, TweenInfo.new(0.35, Enum.EasingStyle.Quad), { Position = UDim2.new(0, 0, 0.5, 0) })
+	if p.onOpen then
+		p.onOpen()
+	end
+	if GuiService.SelectedObject then
+		GuiService.SelectedObject = p.back.button
+	end
+end
+
+-- Settings
+do
+	local shell = UIKit.panel(panelHost, "Settings", closePanel)
+	local list = new("Frame", { BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = shell.content }, {
+		new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
+	local controls = {}
+	controls.MusicVolume = UIKit.slider(list, "Music Volume", 1, MenuState.getSetting("MusicVolume"), function(v)
+		MenuState.setSetting("MusicVolume", v)
+	end)
+	controls.SFXVolume = UIKit.slider(list, "Sound Effects", 2, MenuState.getSetting("SFXVolume"), function(v)
+		MenuState.setSetting("SFXVolume", v)
+		MenuAudio.click()
+	end)
+	controls.CameraMotion = UIKit.toggle(list, "Camera Motion", 3, MenuState.getSetting("CameraMotion"), function(v)
+		MenuState.setSetting("CameraMotion", v)
+	end)
+	controls.VFXQuality = UIKit.selector(list, "Effects Quality", 4, MenuConfig.VFXQualities, MenuState.getSetting("VFXQuality"), function(v)
+		MenuState.setSetting("VFXQuality", v)
+	end)
+	controls.SceneDetail = UIKit.selector(list, "Scene Detail", 5, MenuConfig.SceneDetails, MenuState.getSetting("SceneDetail"), function(v)
+		MenuState.setSetting("SceneDetail", v)
+	end)
+	local hint = UIKit.label({
+		Name = "Hint",
+		Text = "Scene Detail controls post-processing and lantern lights. Roblox's own Graphics Quality slider is in the system menu.",
+		TextWrapped = true,
+		Size = UDim2.new(1, 0, 0, 52),
+		TextSize = 15,
+		FontFace = T.BodyFont,
+		TextTransparency = 0.35,
+		LayoutOrder = 6,
+		Parent = list,
+	})
+	local persistLabel = UIKit.label({
+		Name = "Persistence",
+		Text = "Loading saved settings�",
+		Size = UDim2.new(1, 0, 0, 24),
+		TextSize = 15,
+		FontFace = T.BodyFont,
+		TextColor3 = T.Gold,
+		TextTransparency = 0.2,
+		LayoutOrder = 7,
+		Parent = list,
+	})
+	local reset = UIKit.button(shell.footer, "Reset", {
+		height = 48,
+		textSize = 21,
+		onActivate = function()
+			MenuAudio.click()
+			MenuState.resetSettings()
+		end,
+	})
+	reset.holder.AnchorPoint = Vector2.new(1, 0)
+	reset.holder.Position = UDim2.fromScale(1, 0)
+	reset.holder.Size = UDim2.new(0, 170, 1, 0)
+	MenuState.SettingChanged:Connect(function(key, value)
+		local c = controls[key]
+		if c then
+			c.set(value)
+		end
+	end)
+	panels.Settings = { frame = shell.frame, back = shell.back, persistLabel = persistLabel, hint = hint }
+end
+
+-- Characters
+local function buildFigure(def): Model
+	local m = Instance.new("Model")
+	local c = def.Colors
+	local function block(size: Vector3, cf: CFrame, color: Color3, material: Enum.Material?, shape: Enum.PartType?)
+		local p = Instance.new("Part")
+		p.Anchored = true
+		p.Size = size
+		p.CFrame = cf
+		p.Color = color
+		p.Material = material or Enum.Material.SmoothPlastic
+		if shape then
+			p.Shape = shape
+		end
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.BottomSurface = Enum.SurfaceType.Smooth
+		p.Parent = m
+		return p
+	end
+	local boots = Color3.fromRGB(70, 48, 36)
+	for _, x in ipairs({ -0.48, 0.48 }) do
+		block(Vector3.new(0.8, 2.2, 0.85), CFrame.new(x, 1.3, 0), c.Body:Lerp(Color3.new(0, 0, 0), 0.25))
+		block(Vector3.new(0.9, 0.6, 1.1), CFrame.new(x, 0.3, 0.08), boots)
+	end
+	block(Vector3.new(2.1, 1.0, 1.25), CFrame.new(0, 2.35, 0), c.Body)
+	block(Vector3.new(2.0, 2.0, 1.1), CFrame.new(0, 3.6, 0), c.Body)
+	block(Vector3.new(2.06, 0.32, 1.16), CFrame.new(0, 2.75, 0), c.Accent, Enum.Material.Leather)
+	block(Vector3.new(0.4, 0.4, 0.1), CFrame.new(0, 2.75, 0.6), T.GoldBright, Enum.Material.Metal)
+	for _, x in ipairs({ -1.35, 1.35 }) do
+		block(Vector3.new(0.7, 1.9, 0.8), CFrame.new(x, 3.5, 0), c.Body)
+		block(Vector3.new(0.95, 0.45, 1.0), CFrame.new(x, 4.45, 0), c.Accent, Enum.Material.Metal)
+		block(Vector3.new(0.6, 0.6, 0.6), CFrame.new(x, 2.4, 0), c.Skin, nil, Enum.PartType.Ball)
+	end
+	block(Vector3.new(1.65, 1.65, 1.65), CFrame.new(0, 5.4, 0), c.Skin, nil, Enum.PartType.Ball)
+	block(Vector3.new(1.8, 1.8, 1.8), CFrame.new(0, 5.75, -0.22), c.Hair, nil, Enum.PartType.Ball)
+	for _, x in ipairs({ -0.3, 0.3 }) do
+		block(Vector3.new(0.17, 0.28, 0.05), CFrame.new(x, 5.4, 0.8), Color3.fromRGB(30, 30, 40))
+	end
+	block(Vector3.new(2.0, 3.4, 0.14), CFrame.new(0, 3.0, -0.68) * CFrame.Angles(0.08, 0, 0), c.Accent:Lerp(c.Body, 0.4), Enum.Material.Fabric)
+	m.WorldPivot = CFrame.new() -- pivot at the feet so the turntable keeps the figure grounded
+	if def.Gear == "Shield" then
+		block(Vector3.new(0.3, 2.6, 2.6), CFrame.new(-1.95, 3.2, 0.35) * CFrame.Angles(0, math.rad(80), 0), c.Body:Lerp(T.Ivory, 0.2), Enum.Material.Metal, Enum.PartType.Cylinder)
+		block(Vector3.new(0.34, 1.0, 1.0), CFrame.new(-2.05, 3.2, 0.35) * CFrame.Angles(0, math.rad(80), 0), c.Accent, Enum.Material.Metal, Enum.PartType.Cylinder)
+		block(Vector3.new(0.25, 3.2, 0.25), CFrame.new(1.5, 3.0, 0.5) * CFrame.Angles(0.25, 0, 0), Color3.fromRGB(200, 205, 210), Enum.Material.Metal)
+	elseif def.Gear == "Staff" then
+		block(Vector3.new(0.22, 6.2, 0.22), CFrame.new(1.65, 3.3, 0.35), Color3.fromRGB(120, 84, 56), Enum.Material.Wood)
+		local gem = block(Vector3.new(0.75, 0.75, 0.75), CFrame.new(1.65, 6.6, 0.35), c.Accent, Enum.Material.Neon, Enum.PartType.Ball)
+		gem.Transparency = 0.1
+	else
+		for i = -2, 2 do
+			local a = i * 0.32
+			block(Vector3.new(0.16, 0.9, 0.16), CFrame.new(-1.75, 3.4 + math.sin(a) * 1.7, 0.2 + math.cos(a) * 0.7 - 0.7) * CFrame.Angles(-a, 0, 0), Color3.fromRGB(110, 76, 50), Enum.Material.Wood)
+		end
+		block(Vector3.new(0.7, 2.2, 0.7), CFrame.new(0.6, 4.0, -0.75) * CFrame.Angles(0, 0, -0.4), c.Accent, Enum.Material.Leather) -- quiver
+	end
+	return m
+end
+
+do
+	local shell = UIKit.panel(panelHost, "Characters", closePanel)
+	local vp = new("ViewportFrame", {
+		Name = "Preview",
+		Size = UDim2.new(0.46, 0, 1, -10),
+		BackgroundColor3 = T.Ink,
+		BackgroundTransparency = 0.45,
+		Ambient = Color3.fromRGB(150, 160, 170),
+		LightColor = Color3.fromRGB(255, 244, 226),
+		LightDirection = Vector3.new(-1, -1, -1),
+		Parent = shell.content,
+	}, { UIKit.corner(6), UIKit.stroke(T.Gold, 1, 0.6) })
+	local vpCam = new("Camera", { FieldOfView = 34, Parent = vp })
+	vp.CurrentCamera = vpCam
+	vpCam.CFrame = CFrame.lookAt(Vector3.new(0, 3.8, 17), Vector3.new(0, 3.3, 0))
+	local info = new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.new(0.5, 0, 1, 0), Parent = shell.content })
+	local nameLabel = UIKit.label({ Name = "CharName", Size = UDim2.new(1, 0, 0, 64), TextSize = 27, TextWrapped = true, FontFace = Font.new(T.TitleFont.Family, Enum.FontWeight.Bold), TextYAlignment = Enum.TextYAlignment.Top, Parent = info })
+	local desc = UIKit.label({ Name = "Description", Position = UDim2.fromOffset(0, 70), Size = UDim2.new(1, 0, 0, 170), TextSize = 17, TextWrapped = true, FontFace = T.BodyFont, TextYAlignment = Enum.TextYAlignment.Top, TextTransparency = 0.12, Parent = info })
+	local counter = UIKit.label({ Name = "Counter", Position = UDim2.new(0, 0, 1, -112), Size = UDim2.new(1, 0, 0, 40), TextXAlignment = Enum.TextXAlignment.Center, TextColor3 = T.Gold, TextSize = 19, Parent = info })
+	local index = 1
+	local current: Model? = nil
+	local selectBtn
+	local function show(i: number)
+		index = ((i - 1) % #MenuConfig.Characters) + 1
+		local def = MenuConfig.Characters[index]
+		if current then
+			current:Destroy()
+		end
+		current = buildFigure(def)
+		current.Parent = vp
+		nameLabel.Text = def.Name
+		desc.Text = def.Description
+		counter.Text = string.format("�   %d / %d   �", index, #MenuConfig.Characters)
+		selectBtn.setText(MenuState.SelectedCharacter == def.Id and "Selected" or "Select")
+	end
+	for _, dir in ipairs({ -1, 1 }) do
+		local b = new("TextButton", {
+			Name = dir < 0 and "Prev" or "Next",
+			Position = UDim2.new(dir < 0 and 0 or 1, dir < 0 and 0 or -44, 1, -112),
+			Size = UDim2.fromOffset(44, 40),
+			BackgroundTransparency = 1,
+			Text = "",
+			Selectable = true,
+			Parent = info,
+		})
+		b.Activated:Connect(function()
+			MenuAudio.click()
+			show(index + dir)
+		end)
+	end
+	selectBtn = UIKit.button(info, "Select", {
+		height = 50,
+		primary = true,
+		textSize = 22,
+		onActivate = function()
+			MenuAudio.click()
+			MenuState.SelectedCharacter = MenuConfig.Characters[index].Id
+			show(index)
+		end,
+	})
+	selectBtn.holder.AnchorPoint = Vector2.new(0, 1)
+	selectBtn.holder.Position = UDim2.fromScale(0, 1)
+	selectBtn.holder.Size = UDim2.new(1, 0, 0, 50)
+	show(1)
+	-- slow turntable while the panel is open
+	local spin = 0
+	RunService.RenderStepped:Connect(function(dt)
+		if openPanel and openPanel.frame == shell.frame and current then
+			spin += dt * 0.6
+			current:PivotTo(CFrame.Angles(0, math.sin(spin) * 0.7, 0))
+		end
+	end)
+	panels.Characters = { frame = shell.frame, back = shell.back }
+end
+
+-- Credits
+local function scrollList(parent: Instance): ScrollingFrame
+	return new("ScrollingFrame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 4,
+		ScrollBarImageColor3 = T.Gold,
+		ScrollBarImageTransparency = 0.3,
+		Selectable = true,
+		Parent = parent,
+	}, {
+		new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
+		new("UIPadding", { PaddingRight = UDim.new(0, 12) }),
+	})
+end
+
+do
+	local shell = UIKit.panel(panelHost, "Credits", closePanel)
+	local list = scrollList(shell.content)
+	local order = 0
+	for _, section in ipairs(MenuConfig.Credits) do
+		order += 1
+		UIKit.label({ Text = UIKit.spaced(string.upper(section.Section)), Size = UDim2.new(1, 0, 0, 30), TextSize = 17, TextColor3 = T.Gold, FontFace = Font.new(T.UIFont.Family, Enum.FontWeight.Bold), LayoutOrder = order, Parent = list })
+		for _, name in ipairs(section.Names) do
+			order += 1
+			UIKit.label({ Text = name, Size = UDim2.new(1, 0, 0, 26), TextSize = 20, FontFace = T.BodyFont, TextWrapped = true, LayoutOrder = order, Parent = list })
+		end
+		order += 1
+		new("Frame", { Size = UDim2.new(1, 0, 0, 12), BackgroundTransparency = 1, LayoutOrder = order, Parent = list })
+	end
+	panels.Credits = { frame = shell.frame, back = shell.back }
+end
+
+-- Update log
+do
+	local shell = UIKit.panel(panelHost, "Update Log", closePanel)
+	local list = scrollList(shell.content)
+	local order = 0
+	for _, entry in ipairs(MenuConfig.UpdateLog) do
+		order += 1
+		local head = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = order, Parent = list })
+		UIKit.label({ Text = "v" .. entry.Version, Size = UDim2.new(0.5, 0, 1, 0), TextSize = 20, TextColor3 = T.Gold, FontFace = Font.new(T.UIFont.Family, Enum.FontWeight.Bold), Parent = head })
+		UIKit.label({ Text = entry.Date, AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.new(0.5, 0, 1, 0), TextSize = 16, TextTransparency = 0.35, TextXAlignment = Enum.TextXAlignment.Right, Parent = head })
+		order += 1
+		UIKit.label({ Text = entry.Title, Size = UDim2.new(1, 0, 0, 30), TextSize = 23, FontFace = Font.new(T.TitleFont.Family, Enum.FontWeight.Bold), LayoutOrder = order, Parent = list })
+		for _, note in ipairs(entry.Notes) do
+			order += 1
+			UIKit.label({ Text = "?  " .. note, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextSize = 17, TextWrapped = true, FontFace = T.BodyFont, TextTransparency = 0.1, LayoutOrder = order, Parent = list })
+		end
+		order += 1
+		new("Frame", { Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, LayoutOrder = order, Parent = list })
+	end
+	panels.UpdateLog = { frame = shell.frame, back = shell.back }
+end
+
+-- Play
+local function play()
+	if not interactive or busy or openPanel or not MenuState.is(S.MENU_ACTIVE) then
+		return
+	end
+	busy = true
+	if not MenuState.set(S.TRANSITIONING) then
+		busy = false
+		return
+	end
+	setNavEnabled(false)
+	MenuAudio.click()
+	MenuAudio.transition()
+	UIKit.fade(main, false, 0.6)
+	UIKit.tween(shade, TweenInfo.new(0.8), { BackgroundTransparency = 1 })
+
+	local pushDone = false
+	task.spawn(function()
+		MenuCamera.pushToPlay()
+		pushDone = true
+	end)
+
+	local ok, accepted, reason = pcall(StartGameplay.InvokeServer, StartGameplay, { CharacterId = MenuState.SelectedCharacter })
+	if not ok or accepted ~= true then
+		-- back to the menu, nothing left half-disabled
+		while not pushDone do
+			RunService.RenderStepped:Wait()
+		end
+		MenuState.set(S.MENU_ACTIVE)
+		UIKit.fade(main, true, 0.5)
+		UIKit.tween(shade, TweenInfo.new(0.6), { BackgroundTransparency = 0 })
+		setNavEnabled(true)
+		showToast("Could not enter the world: " .. tostring(ok and reason or accepted))
+		busy = false
+		return
+	end
+
+	local character = player.Character or player.CharacterAdded:Wait()
+	while not pushDone do
+		RunService.RenderStepped:Wait()
+	end
+	UIKit.tween(overlay, TweenInfo.new(0.35, Enum.EasingStyle.Sine), { BackgroundTransparency = 0 }).Completed:Wait()
+	character:WaitForChild("Humanoid", 10)
+	MenuState.set(S.GAMEPLAY)
+	MenuCamera.handOff(character)
+	setCoreUi(true)
+	-- controls are on by default for a fresh character; re-enable defensively without yielding
+	local playerModule = player:FindFirstChild("PlayerScripts") and player.PlayerScripts:FindFirstChild("PlayerModule")
+	if playerModule then
+		local ok2, controls = pcall(function()
+			return require(playerModule):GetControls()
+		end)
+		if ok2 and controls then
+			controls:Enable()
+		end
+	end
+	UIKit.tween(overlay, TweenInfo.new(0.7, Enum.EasingStyle.Sine), { BackgroundTransparency = 1 }).Completed:Wait()
+	gui.Enabled = false
+end
+
+-- Navigation buttons
+table.insert(navButtons, UIKit.button(nav, "Play", { primary = true, height = 66, layoutOrder = 1, onActivate = play }))
+table.insert(navButtons, UIKit.button(nav, "Characters", { height = 50, layoutOrder = 2, onActivate = function()
+	openPanelNamed("Characters")
+end }))
+table.insert(navButtons, UIKit.button(nav, "Settings", { height = 50, layoutOrder = 3, onActivate = function()
+	openPanelNamed("Settings")
+end }))
+table.insert(navButtons, UIKit.button(nav, "Credits", { height = 50, layoutOrder = 4, onActivate = function()
+	openPanelNamed("Credits")
+end }))
+local updateLink = UIKit.link(footer, "Update Log", function()
+	openPanelNamed("UpdateLog")
+end)
+updateLink.Position = UDim2.fromOffset(0, 0)
+
+-- Responsive layout
+local portrait = false
+local function layout()
+	local vs = camera.ViewportSize
+	portrait = vs.Y > vs.X * 1.05
+	if portrait then
+		uiScale.Scale = math.clamp(vs.X / 620, 0.5, 1.2)
+		local s = uiScale.Scale
+		main.AnchorPoint = Vector2.new(0.5, 0)
+		main.Position = UDim2.new(0.5, 0, 0, 0)
+		main.Size = UDim2.fromOffset(480, vs.Y / s)
+		titleBlock.Position = UDim2.fromOffset(40, math.max(60, vs.Y / s * 0.07))
+		nav.Position = UDim2.new(0, 80, 1, -380)
+		footer.Position = UDim2.new(0, 80, 1, -90)
+		panelHost.AnchorPoint = Vector2.new(0.5, 0.5)
+		panelHost.Position = UDim2.fromScale(0.5, 0.55)
+		panelHost.Size = UDim2.fromOffset(560, math.min(640, vs.Y / s - 200))
+		shade.Size = UDim2.fromScale(1, 1)
+		shadeGradient.Rotation = 90
+		shadeGradient.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.55),
+			NumberSequenceKeypoint.new(0.35, 1),
+			NumberSequenceKeypoint.new(0.55, 0.85),
+			NumberSequenceKeypoint.new(1, 0.3),
+		})
+	else
+		uiScale.Scale = math.clamp(math.min(vs.X / 1600, vs.Y / 900), 0.5, 1.35)
+		local s = uiScale.Scale
+		local left = math.max(40, vs.X / s * 0.045)
+		main.AnchorPoint = Vector2.new(0, 0.5)
+		main.Position = UDim2.new(0, left, 0.5, 0)
+		main.Size = UDim2.fromOffset(480, 640)
+		titleBlock.Position = UDim2.fromOffset(0, 0)
+		nav.Position = UDim2.fromOffset(0, 262)
+		footer.Position = UDim2.fromOffset(0, 566)
+		panelHost.AnchorPoint = Vector2.new(0, 0.5)
+		panelHost.Position = UDim2.new(0, left, 0.5, 0)
+		panelHost.Size = UDim2.fromOffset(560, math.min(640, vs.Y / s - 40))
+		shade.Size = UDim2.fromScale(0.62, 1)
+		shadeGradient.Rotation = 0
+		shadeGradient.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.38),
+			NumberSequenceKeypoint.new(0.55, 0.78),
+			NumberSequenceKeypoint.new(1, 1),
+		})
+	end
+	for _, p in pairs(panels) do
+		p.frame.Size = UDim2.new(1, 0, 1, 0)
+	end
+end
+layout()
+camera:GetPropertyChangedSignal("ViewportSize"):Connect(layout)
+
+-- Input: Enter plays, Backspace / gamepad B goes back, gamepad gets selection
+UserInputService.InputBegan:Connect(function(input, processed)
+	if not interactive or busy then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.ButtonB or (not processed and input.KeyCode == Enum.KeyCode.Backspace) then
+		closePanel()
+	elseif not processed and (input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter) and not openPanel and not GuiService.SelectedObject then
+		play()
+	elseif input.UserInputType == Enum.UserInputType.Gamepad1 and not GuiService.SelectedObject and MenuState.is(S.MENU_ACTIVE) then
+		GuiService.SelectedObject = openPanel and (openPanel :: any).back.button or navButtons[1].button
+	end
+end)
+
+-- Settings persistence (debounced)
+local saveToken = 0
+MenuState.SettingChanged:Connect(function()
+	saveToken += 1
+	local token = saveToken
+	task.delay(1.2, function()
+		if token == saveToken then
+			SaveSettings:FireServer(MenuState.getSettings())
+		end
+	end)
+end)
+
+task.spawn(function()
+	local ok, data, persistent = pcall(LoadSettings.InvokeServer, LoadSettings)
+	local label = panels.Settings.persistLabel
+	if ok then
+		local before = saveToken
+		MenuState.applySettings(data)
+		saveToken = before -- applying loaded values is not a user change
+		label.Text = persistent and "Settings are saved to your account." or "Settings apply this session only (saving unavailable here)."
+	else
+		label.Text = "Settings apply this session only (saving unavailable here)."
+	end
+end)
+
+-- Entrance
+UIKit.setHidden(main)
+for _, p in pairs(panels) do
+	UIKit.setHidden(p.frame)
+end
+shade.BackgroundTransparency = 1
+gui.Parent = player:WaitForChild("PlayerGui")
+
+MenuState.set(S.MENU_ACTIVE)
+
+local EASE = Enum.EasingStyle.Quint
+UIKit.tween(overlay, TweenInfo.new(1.1, Enum.EasingStyle.Sine), { BackgroundTransparency = 1 })
+UIKit.tween(shade, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BackgroundTransparency = 0 })
+task.wait(0.35)
+
+-- title rises gently into place
+local titleRest = titleBlock.Position
+titleBlock.Position = titleRest + UDim2.fromOffset(0, 18)
+UIKit.fade(emblem, true, 0.9)
+UIKit.fade(title, true, 1.0)
+UIKit.fade(titleShadow, true, 1.0)
+UIKit.tween(titleBlock, TweenInfo.new(1.1, EASE, Enum.EasingDirection.Out), { Position = titleRest })
+task.wait(0.45)
+UIKit.fade(divider, true, 0.7)
+UIKit.fade(titleBlock.DividerGem, true, 0.7)
+UIKit.fade(subtitle, true, 0.8)
+task.wait(0.3)
+
+-- buttons slide in one after another
+for _, b in ipairs(navButtons) do
+	local btn = b.button
+	btn.Position = UDim2.new(0.5, -22, 0.5, 0)
+	UIKit.fade(b.holder, true, 0.45)
+	UIKit.tween(btn, TweenInfo.new(0.5, EASE, Enum.EasingDirection.Out), { Position = UDim2.fromScale(0.5, 0.5) })
+	task.wait(0.08)
+end
+UIKit.fade(footer, true, 0.6)
+task.wait(0.35)
+interactive = true
